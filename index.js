@@ -1,4 +1,4 @@
-// index.js с буферизацией, автоочисткой и автосозданием листов
+// index.js с буферизацией, автоочисткой и корректной вставкой кодов и артикулов
 
 import { google } from "googleapis";
 import fetch from "node-fetch";
@@ -65,7 +65,7 @@ async function flushBuffers() {
     await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: `${sheet}!A1`,
-      valueInputOption: "RAW",
+      valueInputOption: "USER_ENTERED",
       requestBody: { values: rows },
     });
     buffers[sheet] = []; // очищаем после отправки
@@ -81,14 +81,18 @@ function buildHeaders(login, password) {
   };
 }
 
+function safeText(value) {
+  return typeof value === 'string' ? value.trim() : String(value);
+}
+
 async function getProduct(href, headers, cache) {
   if (cache[href]) return cache[href];
   const res = await fetch(href, { headers });
   const json = await res.json();
   const result = {
-    name: json.name || "—",
-    article: `="${String(json.article || "—")}"`,
-    code: `="${String(json.code || "—")}"`,
+    name: safeText(json.name || "—"),
+    article: safeText(json.article || "—"),
+    code: safeText(json.code || "—"),
   };
   cache[href] = result;
   return result;
@@ -99,9 +103,9 @@ async function getStock(login, password, cabinet) {
   const res = await fetch("https://api.moysklad.ru/api/remap/1.2/report/stock/all?limit=1000", { headers });
   const json = await res.json();
   for (const row of json.rows || []) {
-    const name = row.name || "—";
-    const article = `="${String(row.article || "—")}"`;
-    const code = `="${String(row.code || "—")}"`;
+    const name = safeText(row.name || "—");
+    const article = safeText(row.article || "—");
+    const code = safeText(row.code || "—");
     const stock = row.stock || 0;
     bufferRow(`Остатки ${cabinet}`, [name, article, code, stock]);
     bufferRow("Остатки общее", [cabinet, name, article, code, stock]);

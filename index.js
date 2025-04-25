@@ -87,7 +87,7 @@ async function getProduct(href, headers, cache) {
   const json = await res.json();
   const result = {
     name: json.name || "—",
-    article: json.article || "—",
+    article: String(json.article || "—"),
     code: String(json.code || "—"),
   };
   cache[href] = result;
@@ -100,7 +100,7 @@ async function getStock(login, password, cabinet) {
   const json = await res.json();
   for (const row of json.rows || []) {
     const name = row.name || "—";
-    const article = row.article || "—";
+    const article = String(row.article || "—");
     const code = String(row.code || "—");
     const stock = row.stock || 0;
     bufferRow(`Остатки ${cabinet}`, [name, article, code, stock]);

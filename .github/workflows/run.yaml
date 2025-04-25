@@ -1,0 +1,30 @@
+name: Sync MYSKLAD to Google Sheets
+
+on:
+  workflow_dispatch:       # разрешает ручной запуск
+  schedule:
+    - cron: "0 6 * * *"    # запускается каждый день в 6 утра (UTC)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Write credentials
+        run: |
+          echo '${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}' > credentials.json
+
+      - name: Run script
+        env:
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: node index.js

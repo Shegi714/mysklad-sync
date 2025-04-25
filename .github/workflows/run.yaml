@@ -1,9 +1,10 @@
 name: Sync MYSKLAD to Google Sheets
 
 on:
-  workflow_dispatch:       # разрешает ручной запуск
+  workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"    # запускается каждый день в 6 утра (UTC)
+    - cron: "0 */2 * * *"   # каждые 2 часа
+
 
 jobs:
   sync:

@@ -1,7 +1,8 @@
+// index.js с буферизацией, автоочисткой и автосозданием листов
+
 import { google } from "googleapis";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
-import fs from "fs";
 
 dotenv.config();
 
@@ -13,111 +14,73 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 const spreadsheetId = process.env.SPREADSHEET_ID;
 
-// 📄 Чтение таблицы "основа"
+const buffers = {}; // 💾 Хранилище буферов строк по листам
+
 async function getCabinets() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: "основа!A2:C",
   });
-
   return res.data.values || [];
 }
 
-// 🧹 Очистка и шапка для листа
+async function ensureSheetExists(sheetName) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const exists = meta.data.sheets.some((s) => s.properties.title === sheetName);
+  if (!exists) {
+    console.log(`📄 Создаю лист: ${sheetName}`);
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
+      },
+    });
+  }
+}
+
 async function resetSheet(sheetName, headers) {
+  await ensureSheetExists(sheetName);
   await sheets.spreadsheets.values.clear({
     spreadsheetId,
     range: `${sheetName}!A1:Z10000`,
   });
-
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${sheetName}!A1`,
     valueInputOption: "RAW",
     requestBody: { values: [headers] },
   });
+  buffers[sheetName] = [];
 }
 
-// 📝 Добавление строки
-async function appendRow(sheetName, row) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${sheetName}!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: [row] },
-  });
+function bufferRow(sheetName, row) {
+  if (!buffers[sheetName]) buffers[sheetName] = [];
+  buffers[sheetName].push(row);
 }
 
-// 📦 Получение остатков
-async function getStock(login, password, cabinetName) {
-  const headers = buildHeaders(login, password);
-  const res = await fetch(`https://api.moysklad.ru/api/remap/1.2/report/stock/all?limit=1000`, { headers });
-  const json = await res.json();
-
-  for (const row of json.rows || []) {
-    const name = row.name || "—";
-    const article = row.article || "—";
-    const code = row.code || "—";
-    const qty = row.quantity || 0;
-
-    await appendRow(`Остатки общее`, [cabinetName, name, article, code, qty]);
-    await appendRow(`Остатки ${cabinetName}`, [name, article, code, qty]);
+async function flushBuffers() {
+  for (const [sheet, rows] of Object.entries(buffers)) {
+    if (rows.length === 0) continue;
+    await ensureSheetExists(sheet);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${sheet}!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: rows },
+    });
+    buffers[sheet] = []; // очищаем после отправки
   }
 }
 
-// 📋 Позиции заказов
-async function getPurchaseOrders(login, password, cabinetName) {
-  const headers = buildHeaders(login, password);
-  const res = await fetch(`https://api.moysklad.ru/api/remap/1.2/entity/purchaseorder?expand=positions,agent,state&limit=100`, { headers });
-  const json = await res.json();
-  const cache = {};
-
-  for (const order of json.rows || []) {
-    const status = order.state?.name?.toLowerCase() || "";
-    if (status.includes("доставлено")) continue;
-
-    const date = order.moment?.split("T")[0] || "—";
-    const agent = order.agent?.name || "—";
-    const state = order.state?.name || "—";
-
-    for (const pos of order.positions?.rows || []) {
-      const href = pos.assortment?.meta?.href;
-      const { name, article, code } = await getProduct(href, headers, cache);
-      const qty = pos.quantity || 0;
-
-      await appendRow(`ПозицииЗаказов общее`, [cabinetName, date, agent, state, name, article, code, qty]);
-      await appendRow(`ПозицииЗаказов ${cabinetName}`, [date, agent, state, name, article, code, qty]);
-    }
-  }
+function buildHeaders(login, password) {
+  const auth = Buffer.from(`${login}:${password}`).toString("base64");
+  return {
+    Authorization: `Basic ${auth}`,
+    "Content-Type": "application/json",
+    "User-Agent": "mysklad-sync-bot",
+  };
 }
 
-// 🚚 Отгрузки
-async function getShipments(login, password, cabinetName) {
-  const headers = buildHeaders(login, password);
-  const res = await fetch(`https://api.moysklad.ru/api/remap/1.2/entity/demand?expand=positions,agent,state&limit=100`, { headers });
-  const json = await res.json();
-  const cache = {};
-
-  for (const ship of json.rows || []) {
-    const status = ship.state?.name?.toLowerCase() || "";
-    if (status.includes("поступило в продажу")) continue;
-
-    const date = ship.moment?.split("T")[0] || "—";
-    const agent = ship.agent?.name || "—";
-    const state = ship.state?.name || "—";
-
-    for (const pos of ship.positions?.rows || []) {
-      const href = pos.assortment?.meta?.href;
-      const { name, article, code } = await getProduct(href, headers, cache);
-      const qty = pos.quantity || 0;
-
-      await appendRow(`Отгрузки общее`, [cabinetName, date, agent, state, name, article, code, qty]);
-      await appendRow(`Отгрузки ${cabinetName}`, [date, agent, state, name, article, code, qty]);
-    }
-  }
-}
-
-// 🧠 Подгрузка товара по href
 async function getProduct(href, headers, cache) {
   if (cache[href]) return cache[href];
   const res = await fetch(href, { headers });
@@ -131,35 +94,74 @@ async function getProduct(href, headers, cache) {
   return result;
 }
 
-// 🔐 Авторизация в МойСклад
-function buildHeaders(login, password) {
-  const auth = Buffer.from(`${login}:${password}`).toString("base64");
-  return {
-    "Authorization": `Basic ${auth}`,
-    "Content-Type": "application/json",
-    "User-Agent": "mysklad-sync-bot",
-  };
+async function getStock(login, password, cabinet) {
+  const headers = buildHeaders(login, password);
+  const res = await fetch("https://api.moysklad.ru/api/remap/1.2/report/stock/all?limit=1000", { headers });
+  const json = await res.json();
+  for (const row of json.rows || []) {
+    bufferRow(`Остатки ${cabinet}`, [row.name || "—", row.article || "—", row.code || "—", row.quantity || 0]);
+    bufferRow("Остатки общее", [cabinet, row.name || "—", row.article || "—", row.code || "—", row.quantity || 0]);
+  }
 }
 
-// 🧩 Основной запуск
+async function getPurchaseOrders(login, password, cabinet) {
+  const headers = buildHeaders(login, password);
+  const res = await fetch("https://api.moysklad.ru/api/remap/1.2/entity/purchaseorder?expand=positions,agent,state&limit=100", { headers });
+  const json = await res.json();
+  const cache = {};
+  for (const order of json.rows || []) {
+    const state = order.state?.name?.toLowerCase() || "";
+    if (state.includes("доставлено")) continue;
+    const date = order.moment?.split("T")[0] || "—";
+    const agent = order.agent?.name || "—";
+    const status = order.state?.name || "—";
+    for (const pos of order.positions?.rows || []) {
+      const { name, article, code } = await getProduct(pos.assortment?.meta?.href, headers, cache);
+      const qty = pos.quantity || 0;
+      bufferRow(`ПозицииЗаказов ${cabinet}`, [date, agent, status, name, article, code, qty]);
+      bufferRow("ПозицииЗаказов общее", [cabinet, date, agent, status, name, article, code, qty]);
+    }
+  }
+}
+
+async function getShipments(login, password, cabinet) {
+  const headers = buildHeaders(login, password);
+  const res = await fetch("https://api.moysklad.ru/api/remap/1.2/entity/demand?expand=positions,agent,state&limit=100", { headers });
+  const json = await res.json();
+  const cache = {};
+  for (const ship of json.rows || []) {
+    const state = ship.state?.name?.toLowerCase() || "";
+    if (state.includes("поступило в продажу")) continue;
+    const date = ship.moment?.split("T")[0] || "—";
+    const agent = ship.agent?.name || "—";
+    const status = ship.state?.name || "—";
+    for (const pos of ship.positions?.rows || []) {
+      const { name, article, code } = await getProduct(pos.assortment?.meta?.href, headers, cache);
+      const qty = pos.quantity || 0;
+      bufferRow(`Отгрузки ${cabinet}`, [date, agent, status, name, article, code, qty]);
+      bufferRow("Отгрузки общее", [cabinet, date, agent, status, name, article, code, qty]);
+    }
+  }
+}
+
 (async () => {
   const cabinets = await getCabinets();
 
-  // Очистка глобальных листов
   await resetSheet("Остатки общее", ["Кабинет", "Наименование", "Артикул", "Код", "Остаток"]);
   await resetSheet("ПозицииЗаказов общее", ["Кабинет", "Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
   await resetSheet("Отгрузки общее", ["Кабинет", "Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
 
-  for (const [cabinetName, login, password] of cabinets) {
-    await resetSheet(`Остатки ${cabinetName}`, ["Наименование", "Артикул", "Код", "Остаток"]);
-    await resetSheet(`ПозицииЗаказов ${cabinetName}`, ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
-    await resetSheet(`Отгрузки ${cabinetName}`, ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
+  for (const [cabinet, login, password] of cabinets) {
+    await resetSheet(`Остатки ${cabinet}`, ["Наименование", "Артикул", "Код", "Остаток"]);
+    await resetSheet(`ПозицииЗаказов ${cabinet}`, ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
+    await resetSheet(`Отгрузки ${cabinet}`, ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
 
-    console.log(`📡 Обработка: ${cabinetName}`);
-    await getStock(login, password, cabinetName);
-    await getPurchaseOrders(login, password, cabinetName);
-    await getShipments(login, password, cabinetName);
+    console.log(`▶️ Обработка кабинета: ${cabinet}`);
+    await getStock(login, password, cabinet);
+    await getPurchaseOrders(login, password, cabinet);
+    await getShipments(login, password, cabinet);
   }
 
-  console.log("✅ Синхронизация завершена.");
+  await flushBuffers();
+  console.log("✅ Готово! Все данные загружены.");
 })();

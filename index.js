@@ -88,7 +88,7 @@ async function getProduct(href, headers, cache) {
   const result = {
     name: json.name || "—",
     article: json.article || "—",
-    code: json.code || "—",
+    code: String(json.code || "—"),
   };
   cache[href] = result;
   return result;
@@ -99,8 +99,12 @@ async function getStock(login, password, cabinet) {
   const res = await fetch("https://api.moysklad.ru/api/remap/1.2/report/stock/all?limit=1000", { headers });
   const json = await res.json();
   for (const row of json.rows || []) {
-    bufferRow(`Остатки ${cabinet}`, [row.name || "—", row.article || "—", row.code || "—", row.quantity || 0]);
-    bufferRow("Остатки общее", [cabinet, row.name || "—", row.article || "—", row.code || "—", row.quantity || 0]);
+    const name = row.name || "—";
+    const article = row.article || "—";
+    const code = String(row.code || "—");
+    const stock = row.stock || 0;
+    bufferRow(`Остатки ${cabinet}`, [name, article, code, stock]);
+    bufferRow("Остатки общее", [cabinet, name, article, code, stock]);
   }
 }
 

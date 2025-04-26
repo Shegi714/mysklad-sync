@@ -1,4 +1,4 @@
-// index.js с буферизацией, автоочисткой и корректной вставкой кодов и артикулов
+// index.js с задержкой очистки таблиц до записи новых данных
 
 import { google } from "googleapis";
 import fetch from "node-fetch";
@@ -38,38 +38,40 @@ async function ensureSheetExists(sheetName) {
   }
 }
 
-async function resetSheet(sheetName, headers) {
-  await ensureSheetExists(sheetName);
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId,
-    range: `${sheetName}!A1:Z10000`,
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range: `${sheetName}!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: [headers] },
-  });
-  buffers[sheetName] = [];
-}
-
-function bufferRow(sheetName, row) {
-  if (!buffers[sheetName]) buffers[sheetName] = [];
-  buffers[sheetName].push(row);
+function headersBySheet(sheetName) {
+  if (sheetName.includes("Остатки")) return ["Наименование", "Артикул", "Код", "Остаток"];
+  if (sheetName.includes("ПозицииЗаказов")) return ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"];
+  if (sheetName.includes("Отгрузки")) return ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"];
+  return [];
 }
 
 async function flushBuffers() {
   for (const [sheet, rows] of Object.entries(buffers)) {
     if (rows.length === 0) continue;
     await ensureSheetExists(sheet);
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId,
+      range: `${sheet}!A1:Z10000`,
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheet}!A1`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [headersBySheet(sheet)] },
+    });
     await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: `${sheet}!A1`,
       valueInputOption: "USER_ENTERED",
       requestBody: { values: rows },
     });
-    buffers[sheet] = []; // очищаем после отправки
+    buffers[sheet] = [];
   }
+}
+
+function bufferRow(sheetName, row) {
+  if (!buffers[sheetName]) buffers[sheetName] = [];
+  buffers[sheetName].push(row);
 }
 
 function buildHeaders(login, password) {
@@ -155,14 +157,10 @@ async function getShipments(login, password, cabinet) {
 (async () => {
   const cabinets = await getCabinets();
 
-  await resetSheet("Остатки общее", ["Кабинет", "Наименование", "Артикул", "Код", "Остаток"]);
-  await resetSheet("ПозицииЗаказов общее", ["Кабинет", "Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
-  await resetSheet("Отгрузки общее", ["Кабинет", "Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
-
   for (const [cabinet, login, password] of cabinets) {
-    await resetSheet(`Остатки ${cabinet}`, ["Наименование", "Артикул", "Код", "Остаток"]);
-    await resetSheet(`ПозицииЗаказов ${cabinet}`, ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
-    await resetSheet(`Отгрузки ${cabinet}`, ["Дата", "Контрагент", "Статус", "Товар", "Артикул", "Код", "Количество"]);
+    await ensureSheetExists(`Остатки ${cabinet}`);
+    await ensureSheetExists(`ПозицииЗаказов ${cabinet}`);
+    await ensureSheetExists(`Отгрузки ${cabinet}`);
 
     console.log(`▶️ Обработка кабинета: ${cabinet}`);
     await getStock(login, password, cabinet);
